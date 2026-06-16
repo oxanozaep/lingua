@@ -308,26 +308,25 @@ function today(){
 function rollDayIfNeeded(){
   const td = today();
   if (state.today.date !== td){
-    snapshotHistory();
     state.today = {date: td, points: 0, correct: 0, wrong: 0};
   }
 }
-function snapshotHistory(){
-  // Record the previous day's summary if it had activity
-  const prev = state.today;
-  if (prev && (prev.points > 0 || prev.correct > 0 || prev.wrong > 0)){
-    const stats = computeStats();
-    state.history.push({
-      date: prev.date,
-      points: prev.points,
-      correct: prev.correct,
-      wrong: prev.wrong,
-      fluency: stats.fluencyPct,
-      learned: stats.learned,
-      mastered: stats.mastered,
-    });
-    if (state.history.length > 365) state.history = state.history.slice(-365);
-  }
+function upsertTodayHistory(){
+  const stats = computeStats();
+  const td = state.today.date;
+  const entry = {
+    date: td,
+    points: state.today.points,
+    correct: state.today.correct,
+    wrong: state.today.wrong,
+    fluency: stats.fluencyPct,
+    learned: stats.learned,
+    mastered: stats.mastered,
+  };
+  const idx = state.history.findIndex(h => h.date === td);
+  if (idx >= 0) state.history[idx] = entry;
+  else state.history.push(entry);
+  if (state.history.length > 365) state.history = state.history.slice(-365);
 }
 function bumpStreak(){
   const td = today();
@@ -345,15 +344,15 @@ function bumpStreak(){
 function getMastery(id){ return state.mastery[id] || 0; }
 function setMastery(id, v){ state.mastery[id] = Math.max(0, Math.min(5, v)); }
 
+const UNLOCK_THRESHOLD = 0.5; // cumulative mastery fraction to unlock the next group
+
 function unlockedGroups(){
-  // Walk in groupOrder. Unlock first group always. Unlock next when current ≥70% learned (mastery≥3).
+  // Walk in groupOrder. Unlock first group always. Unlock next when current ≥50% mastery (cumulative).
   const order = data.groupOrder;
   const unlocked = [order[0]];
   for (let i = 0; i < order.length - 1; i++){
-    const g = order[i];
-    const items = data.items.filter(it => it.group === g);
-    const learned = items.filter(it => getMastery(it.id) >= 3).length;
-    if (items.length && learned / items.length >= 0.7){
+    const p = groupProgress(order[i]);
+    if (p.count && p.masteryPct >= UNLOCK_THRESHOLD){
       unlocked.push(order[i+1]);
     } else {
       break;
@@ -363,12 +362,11 @@ function unlockedGroups(){
 }
 
 function currentGroup(){
-  // The newest unlocked group that isn't yet ≥70% learned, else last unlocked.
+  // The newest unlocked group that isn't yet at threshold, else last unlocked.
   const groups = unlockedGroups();
   for (const g of groups){
-    const items = data.items.filter(it => it.group === g);
-    const learned = items.filter(it => getMastery(it.id) >= 3).length;
-    if (items.length && learned / items.length < 0.7) return g;
+    const p = groupProgress(g);
+    if (p.count && p.masteryPct < UNLOCK_THRESHOLD) return g;
   }
   return groups[groups.length - 1];
 }
@@ -428,7 +426,24 @@ function recordAnswer(item, correct){
     setMastery(item.id, m - 1);
     state.today.wrong += 1;
   }
+  upsertTodayHistory();
   saveState();
+}
+
+function groupProgress(g){
+  // Returns {count, learned, mastered, sumMastery, masteryPct (0..1), learnedPct (0..1)}
+  const items = data.items.filter(it => it.group === g);
+  let sumMastery = 0, learned = 0, mastered = 0;
+  for (const it of items){
+    const m = getMastery(it.id);
+    sumMastery += m;
+    if (m >= 3) learned += 1;
+    if (m >= 5) mastered += 1;
+  }
+  const count = items.length;
+  const masteryPct = count ? sumMastery / (count * 5) : 0;
+  const learnedPct = count ? learned / count : 0;
+  return {count, learned, mastered, sumMastery, masteryPct, learnedPct};
 }
 
 function computeStats(){
@@ -532,15 +547,14 @@ function renderHome(){
       <div class="row between" style="margin-bottom:8px"><div class="h2">${t('unlockedGroups')}</div><span class="muted">${groups.length}/${data.groupOrder.length}</span></div>
       <div class="list" style="gap:8px">
         ${data.groupOrder.map(g => {
-          const items = data.items.filter(it => it.group === g);
-          const learned = items.filter(it => getMastery(it.id) >= 3).length;
-          const pct = items.length ? Math.round((learned/items.length)*100) : 0;
+          const p = groupProgress(g);
+          const pct = Math.round(p.masteryPct * 100);
           const isUnlocked = groups.includes(g);
           return `
           <div class="row between" style="opacity:${isUnlocked?1:0.45}">
             <div style="display:flex;flex-direction:column">
               <div style="font-size:14px">${tGroup(g)}</div>
-              <div class="muted" style="font-size:12px">${learned}/${items.length}</div>
+              <div class="muted" style="font-size:12px">${pct}% · ${p.learned}/${p.count}${p.mastered?` · ${p.mastered}★`:''}</div>
             </div>
             <div style="width:120px"><div class="progressbar"><div class="fill" style="width:${pct}%"></div></div></div>
           </div>`;
@@ -751,17 +765,12 @@ function endSession(session){
 function renderProgress(){
   setActiveTab('progress');
   const s = computeStats();
-  // Build chart series: last up to 30 days
-  const series = state.history.slice(-30);
-  // Append today's snapshot live for the chart preview
-  const todayEntry = {
-    date: state.today.date,
-    points: state.today.points,
-    fluency: s.fluencyPct,
-    learned: s.learned,
-    mastered: s.mastered,
-  };
-  const chartSeries = [...series, todayEntry].filter(x => x);
+  // Ensure today's entry is in history before rendering
+  if (state.today.points > 0 || state.today.correct > 0 || state.today.wrong > 0){
+    upsertTodayHistory();
+  }
+  // Build chart series: last up to 30 days from history
+  const chartSeries = state.history.slice(-30);
 
   const root = $('#screen');
   root.innerHTML = `
@@ -788,20 +797,18 @@ function renderProgress(){
     <section class="card">
       <div class="row between" style="margin-bottom:6px"><div class="h2">${t('evolutionTitle')}</div></div>
       <div class="legend"><span class="l1">${t('legendPoints')}</span><span class="l2">${t('legendFluency')}</span></div>
-      <div class="chart" id="chart">${chartSeries.length < 2 ? `<div class="muted" style="display:grid;place-items:center;height:100%">${t('noHistoryYet')}</div>` : renderChartSVG(chartSeries)}</div>
+      <div class="chart" id="chart">${chartSeries.length < 1 ? `<div class="muted" style="display:grid;place-items:center;height:100%">${t('noHistoryYet')}</div>` : renderChartSVG(chartSeries)}</div>
     </section>
 
     <section class="card">
       <div class="h2" style="margin-bottom:8px">${t('unlockedGroups')}</div>
       <div class="list" style="gap:8px">
         ${data.groupOrder.map(g => {
-          const items = data.items.filter(it => it.group === g);
-          const learned = items.filter(it => getMastery(it.id) >= 3).length;
-          const mastered = items.filter(it => getMastery(it.id) >= 5).length;
-          const pct = items.length ? Math.round((learned/items.length)*100) : 0;
+          const p = groupProgress(g);
+          const pct = Math.round(p.masteryPct * 100);
           return `
           <div>
-            <div class="row between"><div style="font-size:14px">${tGroup(g)}</div><div class="muted" style="font-size:12px">${learned}/${items.length} · ${mastered}★</div></div>
+            <div class="row between"><div style="font-size:14px">${tGroup(g)}</div><div class="muted" style="font-size:12px">${pct}% · ${p.learned}/${p.count}${p.mastered?` · ${p.mastered}★`:''}</div></div>
             <div class="progressbar" style="margin-top:6px"><div class="fill" style="width:${pct}%"></div></div>
           </div>`;
         }).join('')}
@@ -813,7 +820,7 @@ function renderProgress(){
 function renderChartSVG(series){
   const W = 320, H = 184, P = 22;
   const n = series.length;
-  const xs = (i) => P + (n === 1 ? 0 : i * (W - 2*P) / (n - 1));
+  const xs = (i) => n === 1 ? W/2 : P + i * (W - 2*P) / (n - 1);
   const maxPoints = Math.max(10, ...series.map(s => s.points || 0));
   const ysPts = (v) => H - P - (v / maxPoints) * (H - 2*P);
   const ysFlu = (v) => H - P - (v / 100) * (H - 2*P);
