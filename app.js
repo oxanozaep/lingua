@@ -8,6 +8,11 @@
 const LS_KEY = 'lingua.state.v1';
 const LANG_CODES = ['es','en','fr','pt','de','it'];
 const SESSION_LEN = 10; // items per practice session
+const LEVEL_VALUE = {A1:1, A2:2, B1:3, B2:4, C1:5, C2:6};
+const CEFR_LABELS = ['A1','A2','B1','B2','C1','C2'];
+const INTERACTION_WINDOW = 500;
+const WRONG_PENALTY = 3; // wrong = -3 * itemLevelValue
+const HISTORY_DAYS = 100;
 
 /* ---------------- i18n ---------------- */
 const LANG_NAMES = {
@@ -28,6 +33,9 @@ const I18N = {
     learning:'Aprendiendo', from:'desde',
     welcomeHi:'¡Hola!', welcomeSub:'Sigamos con tu italiano.',
     levelLabel:'Tu nivel', todayPoints:'Hoy', streakDays:'Racha',
+    practiceUpTo:'Practicas hasta {cefr}', avgLastN:'Promedio de las últimas {n} interacciones',
+    evolutionLastDays:'Evolución del nivel · últimos {n} días',
+    legendLevel:'Nivel', interactionsLabel:'Interacciones', accuracyLabel:'Aciertos',
     activitiesTitle:'¿Qué quieres practicar?',
     actFlashWords:'Flashcards de palabras', actFlashWordsD:'Da la vuelta y marca si acertaste',
     actFlashPhrases:'Flashcards de frases', actFlashPhrasesD:'Frases comunes en contexto',
@@ -67,6 +75,9 @@ const I18N = {
     learning:'Learning', from:'from',
     welcomeHi:'Hi!', welcomeSub:"Let's keep learning.",
     levelLabel:'Your level', todayPoints:'Today', streakDays:'Streak',
+    practiceUpTo:'Practicing up to {cefr}', avgLastN:'Average of the last {n} interactions',
+    evolutionLastDays:'Level evolution · last {n} days',
+    legendLevel:'Level', interactionsLabel:'Interactions', accuracyLabel:'Accuracy',
     activitiesTitle:'What do you want to practice?',
     actFlashWords:'Word flashcards', actFlashWordsD:'Flip and mark if you got it',
     actFlashPhrases:'Phrase flashcards', actFlashPhrasesD:'Common phrases in context',
@@ -106,6 +117,9 @@ const I18N = {
     learning:'Apprentissage', from:'depuis',
     welcomeHi:'Salut !', welcomeSub:'Continuons à apprendre.',
     levelLabel:'Ton niveau', todayPoints:"Aujourd'hui", streakDays:'Série',
+    practiceUpTo:"Tu pratiques jusqu'au {cefr}", avgLastN:'Moyenne des {n} dernières interactions',
+    evolutionLastDays:'Évolution du niveau · {n} derniers jours',
+    legendLevel:'Niveau', interactionsLabel:'Interactions', accuracyLabel:'Précision',
     activitiesTitle:'Que veux-tu pratiquer ?',
     actFlashWords:'Flashcards de mots', actFlashWordsD:"Retourne et marque si tu as réussi",
     actFlashPhrases:'Flashcards de phrases', actFlashPhrasesD:'Phrases courantes',
@@ -145,6 +159,9 @@ const I18N = {
     learning:'Aprendendo', from:'desde',
     welcomeHi:'Olá!', welcomeSub:'Vamos continuar a aprender.',
     levelLabel:'Seu nível', todayPoints:'Hoje', streakDays:'Sequência',
+    practiceUpTo:'Praticas até {cefr}', avgLastN:'Média das últimas {n} interações',
+    evolutionLastDays:'Evolução do nível · últimos {n} dias',
+    legendLevel:'Nível', interactionsLabel:'Interações', accuracyLabel:'Acertos',
     activitiesTitle:'O que queres praticar?',
     actFlashWords:'Flashcards de palavras', actFlashWordsD:'Vira e marca se acertaste',
     actFlashPhrases:'Flashcards de frases', actFlashPhrasesD:'Frases comuns em contexto',
@@ -184,6 +201,9 @@ const I18N = {
     learning:'Lerne', from:'aus',
     welcomeHi:'Hallo!', welcomeSub:'Weiter lernen.',
     levelLabel:'Dein Niveau', todayPoints:'Heute', streakDays:'Serie',
+    practiceUpTo:'Du übst bis {cefr}', avgLastN:'Durchschnitt der letzten {n} Interaktionen',
+    evolutionLastDays:'Niveau-Verlauf · letzte {n} Tage',
+    legendLevel:'Niveau', interactionsLabel:'Interaktionen', accuracyLabel:'Treffer',
     activitiesTitle:'Was möchtest du üben?',
     actFlashWords:'Wort-Karten', actFlashWordsD:'Umdrehen und bewerten',
     actFlashPhrases:'Satz-Karten', actFlashPhrasesD:'Häufige Sätze',
@@ -223,6 +243,9 @@ const I18N = {
     learning:'Imparando', from:'da',
     welcomeHi:'Ciao!', welcomeSub:'Continuiamo a imparare.',
     levelLabel:'Il tuo livello', todayPoints:'Oggi', streakDays:'Serie',
+    practiceUpTo:'Pratichi fino a {cefr}', avgLastN:'Media delle ultime {n} interazioni',
+    evolutionLastDays:'Evoluzione del livello · ultimi {n} giorni',
+    legendLevel:'Livello', interactionsLabel:'Interazioni', accuracyLabel:'Precisione',
     activitiesTitle:'Cosa vuoi praticare?',
     actFlashWords:'Flashcard di parole', actFlashWordsD:'Gira e segna se hai indovinato',
     actFlashPhrases:'Flashcard di frasi', actFlashPhrasesD:'Frasi comuni in contesto',
@@ -281,8 +304,9 @@ function defaultState(){
   return {
     base: 'es',
     target: 'it',
-    mastery: {},        // id -> 0..5
-    history: [],        // [{date, points, fluency, learned, mastered}]
+    mastery: {},        // id -> 0..5 (for SRS-style item selection)
+    interactions: [],   // last INTERACTION_WINDOW entries: {id, lv, val, correct, score, ts}
+    history: [],        // [{date, level, points, correct, wrong, interactions}]
     today: {date: today(), points: 0, correct: 0, wrong: 0},
     streak: {last: null, count: 0},
     createdAt: new Date().toISOString(),
@@ -312,16 +336,14 @@ function rollDayIfNeeded(){
   }
 }
 function upsertTodayHistory(){
-  const stats = computeStats();
   const td = state.today.date;
   const entry = {
     date: td,
+    level: userLevel(),
     points: state.today.points,
     correct: state.today.correct,
     wrong: state.today.wrong,
-    fluency: stats.fluencyPct,
-    learned: stats.learned,
-    mastered: stats.mastered,
+    interactions: state.interactions.length,
   };
   const idx = state.history.findIndex(h => h.date === td);
   if (idx >= 0) state.history[idx] = entry;
@@ -340,53 +362,51 @@ function bumpStreak(){
   state.streak.last = td;
 }
 
-/* ---------------- Difficulty / item selection ---------------- */
+/* ---------------- Mastery (for item picking) ---------------- */
 function getMastery(id){ return state.mastery[id] || 0; }
 function setMastery(id, v){ state.mastery[id] = Math.max(0, Math.min(5, v)); }
 
-const UNLOCK_THRESHOLD = 0.5; // cumulative mastery fraction to unlock the next group
-
-function unlockedGroups(){
-  // Walk in groupOrder. Unlock first group always. Unlock next when current ≥50% mastery (cumulative).
-  const order = data.groupOrder;
-  const unlocked = [order[0]];
-  for (let i = 0; i < order.length - 1; i++){
-    const p = groupProgress(order[i]);
-    if (p.count && p.masteryPct >= UNLOCK_THRESHOLD){
-      unlocked.push(order[i+1]);
-    } else {
-      break;
-    }
-  }
-  return unlocked;
+/* ---------------- Level (CEFR) ---------------- */
+function itemLevelValue(item){
+  return LEVEL_VALUE[item.level] || 1;
+}
+function userLevel(){
+  // Average of last INTERACTION_WINDOW interaction scores
+  const xs = state.interactions;
+  if (!xs.length) return 0;
+  let sum = 0;
+  for (const x of xs) sum += x.score;
+  return sum / xs.length;
+}
+function cefrLabel(level){
+  if (level < 1) return '—';
+  const idx = Math.min(5, Math.floor(level) - 1);
+  return CEFR_LABELS[idx];
+}
+function maxPracticeLevelValue(){
+  // The user can practice up to: floor(level) + 2, clamped to [1, 6]
+  const lv = userLevel();
+  const base = Math.max(0, Math.floor(lv));
+  return Math.max(1, Math.min(6, base + 2));
+}
+function maxPracticeCefr(){
+  return CEFR_LABELS[maxPracticeLevelValue() - 1];
 }
 
-function currentGroup(){
-  // The newest unlocked group that isn't yet at threshold, else last unlocked.
-  const groups = unlockedGroups();
-  for (const g of groups){
-    const p = groupProgress(g);
-    if (p.count && p.masteryPct < UNLOCK_THRESHOLD) return g;
-  }
-  return groups[groups.length - 1];
-}
-
+/* ---------------- Item eligibility / selection ---------------- */
 function eligibleItems(type){
-  // Only items from unlocked groups, matching type
-  const groups = new Set(unlockedGroups());
-  return data.items.filter(it => it.type === type && groups.has(it.group));
+  const maxLv = maxPracticeLevelValue();
+  return data.items.filter(it => it.type === type && itemLevelValue(it) <= maxLv);
 }
 
 function pickItemWeighted(pool, exclude){
   // Lower mastery → higher weight. Mastered (5) gets a small weight for retention.
-  // Add a boost for items in the current (frontier) group so newest content shows up.
-  const cur = currentGroup();
+  // Boost items at the user's frontier level so they progress upward.
+  const frontier = maxPracticeLevelValue();
   const weighted = pool.filter(it => !exclude || !exclude.has(it.id)).map(it => {
     const m = getMastery(it.id);
-    let w;
-    if (m >= 5) w = 0.15;
-    else w = (6 - m); // 6,5,4,3,2,1
-    if (it.group === cur) w += 1.5;
+    let w = m >= 5 ? 0.15 : (6 - m); // 6,5,4,3,2,1
+    if (itemLevelValue(it) === frontier) w += 1.0;
     return {it, w};
   });
   const total = weighted.reduce((s,x)=>s+x.w, 0);
@@ -399,33 +419,41 @@ function pickItemWeighted(pool, exclude){
 }
 
 function pickQuizDistractors(item, count){
-  // Same group, same type, different id
+  // Same group + same type ideally; fallback to same type
   const pool = data.items.filter(x => x.group === item.group && x.type === item.type && x.id !== item.id);
-  // If group is too small, expand to type
   if (pool.length < count){
     const more = data.items.filter(x => x.type === item.type && x.id !== item.id && !pool.find(p=>p.id===x.id));
-    while (pool.length < count && more.length){
-      pool.push(more.shift());
-    }
+    while (pool.length < count && more.length) pool.push(more.shift());
   }
-  const shuffled = pool.sort(()=>Math.random()-0.5).slice(0, count);
-  return shuffled;
+  return pool.sort(()=>Math.random()-0.5).slice(0, count);
 }
 
 /* ---------------- Scoring ---------------- */
 function recordAnswer(item, correct){
   rollDayIfNeeded();
+  const val = itemLevelValue(item);
+  const score = correct ? val : -WRONG_PENALTY * val;
+
+  // SRS-style mastery (used for selection only)
   const m = getMastery(item.id);
+  setMastery(item.id, correct ? m + 1 : m - 1);
+
+  // Push interaction (capped at window size)
+  state.interactions.push({
+    id: item.id, lv: item.level, val, correct, score, ts: Date.now()
+  });
+  if (state.interactions.length > INTERACTION_WINDOW){
+    state.interactions = state.interactions.slice(-INTERACTION_WINDOW);
+  }
+
   if (correct){
-    setMastery(item.id, m + 1);
-    const pts = item.type === 'Phrase' ? 2 : 1;
-    state.today.points += pts;
+    state.today.points += val;
     state.today.correct += 1;
     bumpStreak();
   } else {
-    setMastery(item.id, m - 1);
     state.today.wrong += 1;
   }
+
   upsertTodayHistory();
   saveState();
 }
@@ -461,14 +489,15 @@ function computeStats(){
   return {total, mastered, learned, seen, fluencyPct};
 }
 
-function levelLabel(){
-  const s = computeStats();
-  const p = s.fluencyPct;
-  if (p < 10) return 'A1 · ' + ({es:'Principio',en:'Starter',fr:'Début',pt:'Início',de:'Anfang',it:'Inizio'})[state.base];
-  if (p < 30) return 'A1 · ' + ({es:'En desarrollo',en:'Developing',fr:'En progrès',pt:'Em progresso',de:'In Entwicklung',it:'In sviluppo'})[state.base];
-  if (p < 60) return 'A1 · ' + ({es:'Sólido',en:'Solid',fr:'Solide',pt:'Sólido',de:'Solide',it:'Solido'})[state.base];
-  if (p < 85) return 'A1+ · ' + ({es:'Avanzado',en:'Advanced',fr:'Avancé',pt:'Avançado',de:'Fortgeschritten',it:'Avanzato'})[state.base];
-  return 'A1 ✓ · ' + ({es:'Listo para A2',en:'Ready for A2',fr:'Prêt pour A2',pt:'Pronto para A2',de:'Bereit für A2',it:'Pronto per A2'})[state.base];
+function levelDisplay(){
+  // Returns {numeric (e.g. 2.5), cefr (e.g. "A2"), progressInLevel (0..1), nextCefr}
+  const lv = userLevel();
+  const cefr = cefrLabel(lv);
+  const progressInLevel = lv >= 1 ? (lv - Math.floor(lv)) : Math.max(0, lv);
+  const nextCefr = lv >= 1
+    ? CEFR_LABELS[Math.min(5, Math.floor(lv))]
+    : 'A1';
+  return {numeric: lv, cefr, progressInLevel, nextCefr};
 }
 
 /* ---------------- Rendering ---------------- */
@@ -488,36 +517,20 @@ function setActiveTab(name){
 
 function renderHome(){
   setActiveTab('home');
-  const s = computeStats();
-  const cg = currentGroup();
-  const groups = unlockedGroups();
   const root = $('#screen');
   root.innerHTML = `
-    <section class="card level-card">
-      <div class="row between">
-        <div>
-          <div class="l">${t('welcomeHi')}</div>
-          <div class="v">${levelLabel()}</div>
-          <div class="muted" style="margin-top:4px">${t('welcomeSub')}</div>
-        </div>
-        <div style="text-align:right">
-          <div class="muted" style="font-size:11px">${t('fluencyPct')}</div>
-          <div style="font-size:26px;font-weight:800">${s.fluencyPct}%</div>
-        </div>
-      </div>
-      <div class="progressbar" style="margin-top:12px"><div class="fill" style="width:${s.fluencyPct}%"></div></div>
-    </section>
+    ${renderLevelCard()}
 
     <section class="kpis">
       <div class="kpi"><div class="v">${state.today.points}</div><div class="l">${t('todayPoints')}</div></div>
       <div class="kpi"><div class="v">${state.streak.count}</div><div class="l">${t('streakDays')}</div></div>
-      <div class="kpi"><div class="v">${s.mastered}</div><div class="l">${t('masteredCount')}</div></div>
+      <div class="kpi"><div class="v">${state.interactions.length}</div><div class="l">${t('interactionsLabel')}</div></div>
     </section>
 
     <section class="card">
       <div class="row between" style="margin-bottom:10px">
         <div class="h2">${t('activitiesTitle')}</div>
-        <span class="group-chip">${tGroup(cg)}</span>
+        <span class="group-chip">${t('practiceUpTo', {cefr: maxPracticeCefr()})}</span>
       </div>
       <div class="activities">
         <button class="activity" data-act="flash-word">
@@ -542,25 +555,6 @@ function renderHome(){
         </button>
       </div>
     </section>
-
-    <section class="card">
-      <div class="row between" style="margin-bottom:8px"><div class="h2">${t('unlockedGroups')}</div><span class="muted">${groups.length}/${data.groupOrder.length}</span></div>
-      <div class="list" style="gap:8px">
-        ${data.groupOrder.map(g => {
-          const p = groupProgress(g);
-          const pct = Math.round(p.masteryPct * 100);
-          const isUnlocked = groups.includes(g);
-          return `
-          <div class="row between" style="opacity:${isUnlocked?1:0.45}">
-            <div style="display:flex;flex-direction:column">
-              <div style="font-size:14px">${tGroup(g)}</div>
-              <div class="muted" style="font-size:12px">${pct}% · ${p.learned}/${p.count}${p.mastered?` · ${p.mastered}★`:''}</div>
-            </div>
-            <div style="width:120px"><div class="progressbar"><div class="fill" style="width:${pct}%"></div></div></div>
-          </div>`;
-        }).join('')}
-      </div>
-    </section>
   `;
 
   $$('.activity').forEach(b => b.addEventListener('click', () => {
@@ -574,15 +568,40 @@ function renderHome(){
   }));
 }
 
+function renderLevelCard(){
+  const lv = levelDisplay();
+  const numericStr = lv.numeric.toFixed(2);
+  const pct = Math.round(lv.progressInLevel * 100);
+  return `
+    <section class="card level-card">
+      <div class="row between">
+        <div>
+          <div class="l">${t('levelLabel')}</div>
+          <div class="v">${lv.cefr} · ${numericStr}</div>
+          <div class="muted" style="margin-top:4px">${t('avgLastN', {n: Math.min(INTERACTION_WINDOW, state.interactions.length)})}</div>
+        </div>
+        <div style="text-align:right">
+          <div class="muted" style="font-size:11px">${t('practiceUpTo', {cefr: maxPracticeCefr()})}</div>
+          <div style="font-size:26px;font-weight:800">${maxPracticeCefr()}</div>
+        </div>
+      </div>
+      <div class="progressbar" style="margin-top:12px"><div class="fill" style="width:${pct}%"></div></div>
+    </section>
+  `;
+}
+
 /* ---------------- Practice screen (default = home with shortcuts) ---------------- */
 function renderPractice(){
   setActiveTab('practice');
-  const cg = currentGroup();
+  const lv = levelDisplay();
   const root = $('#screen');
   root.innerHTML = `
     <section class="card">
-      <div class="h1">${t('activitiesTitle')}</div>
-      <div class="muted" style="margin-top:4px">${t('currentGroup')}: ${tGroup(cg)}</div>
+      <div class="row between">
+        <div class="h1">${t('activitiesTitle')}</div>
+        <span class="pill">${lv.cefr} · ${lv.numeric.toFixed(2)}</span>
+      </div>
+      <div class="muted" style="margin-top:4px">${t('practiceUpTo', {cefr: maxPracticeCefr()})}</div>
     </section>
     <div class="activities">
       <button class="activity" data-act="flash-word">
@@ -640,7 +659,10 @@ function showFlashcard(session){
     <div class="row between">
       <button class="pill" id="exitSess">✕</button>
       <span class="pill">${session.idx+1} / ${session.total}</span>
-      <span class="group-chip">${tGroup(item.group)}</span>
+      <span class="pill">${cefrLabel(userLevel())} · ${userLevel().toFixed(2)}</span>
+    </div>
+    <div class="row between" style="margin-top:-6px">
+      <span class="group-chip">${item.level} · ${tGroup(item.group)}</span>
     </div>
     <div class="flash-wrap">
       <div class="flash" id="flash">
@@ -674,7 +696,7 @@ function showFlashcard(session){
   $('#exitSess').addEventListener('click', renderHome);
   const next = (ok) => {
     recordAnswer(item, ok);
-    if (ok){ session.correct += 1; session.points += (item.type === 'Phrase' ? 2 : 1); }
+    if (ok){ session.correct += 1; session.points += itemLevelValue(item); }
     session.idx += 1;
     if (session.idx >= session.total) endSession(session);
     else showFlashcard(session);
@@ -707,7 +729,10 @@ function showQuiz(session){
     <div class="row between">
       <button class="pill" id="exitSess">✕</button>
       <span class="pill">${session.idx+1} / ${session.total}</span>
-      <span class="group-chip">${tGroup(item.group)}</span>
+      <span class="pill">${cefrLabel(userLevel())} · ${userLevel().toFixed(2)}</span>
+    </div>
+    <div class="row between" style="margin-top:-6px">
+      <span class="group-chip">${item.level} · ${tGroup(item.group)}</span>
     </div>
     <div class="quiz-prompt">
       <span class="lang-tag">${langName(state.base)} → ${langName(state.target)}</span>
@@ -729,7 +754,7 @@ function showQuiz(session){
       else if (id === chosenId && !correct) b.classList.add('wrong');
     });
     recordAnswer(item, correct);
-    if (correct){ session.correct += 1; session.points += (item.type === 'Phrase' ? 2 : 1); }
+    if (correct){ session.correct += 1; session.points += itemLevelValue(item); }
     setTimeout(() => {
       session.idx += 1;
       if (session.idx >= session.total) endSession(session);
@@ -764,79 +789,59 @@ function endSession(session){
 /* ---------------- Progress ---------------- */
 function renderProgress(){
   setActiveTab('progress');
-  const s = computeStats();
-  // Ensure today's entry is in history before rendering
-  if (state.today.points > 0 || state.today.correct > 0 || state.today.wrong > 0){
+  // Refresh today's snapshot live
+  if (state.interactions.length > 0){
     upsertTodayHistory();
   }
-  // Build chart series: last up to 30 days from history
-  const chartSeries = state.history.slice(-30);
+  const chartSeries = state.history.slice(-HISTORY_DAYS);
+  const lv = levelDisplay();
+  const accuracy = state.interactions.length
+    ? Math.round((state.interactions.filter(x => x.correct).length / state.interactions.length) * 100)
+    : 0;
 
   const root = $('#screen');
   root.innerHTML = `
-    <section class="card level-card">
-      <div class="row between">
-        <div>
-          <div class="l">${t('levelLabel')}</div>
-          <div class="v">${levelLabel()}</div>
-        </div>
-        <div style="text-align:right">
-          <div class="muted" style="font-size:11px">${t('fluencyPct')}</div>
-          <div style="font-size:26px;font-weight:800">${s.fluencyPct}%</div>
-        </div>
-      </div>
-      <div class="progressbar" style="margin-top:12px"><div class="fill" style="width:${s.fluencyPct}%"></div></div>
-    </section>
+    ${renderLevelCard()}
 
     <section class="kpis">
-      <div class="kpi"><div class="v">${s.mastered}</div><div class="l">${t('masteredCount')}</div></div>
-      <div class="kpi"><div class="v">${s.learned}</div><div class="l">${t('learnedCount')}</div></div>
-      <div class="kpi"><div class="v">${s.seen}</div><div class="l">${t('seenCount')}</div></div>
+      <div class="kpi"><div class="v">${state.interactions.length}</div><div class="l">${t('interactionsLabel')}</div></div>
+      <div class="kpi"><div class="v">${accuracy}%</div><div class="l">${t('accuracyLabel')}</div></div>
+      <div class="kpi"><div class="v">${state.today.points}</div><div class="l">${t('todayPoints')}</div></div>
     </section>
 
     <section class="card">
-      <div class="row between" style="margin-bottom:6px"><div class="h2">${t('evolutionTitle')}</div></div>
-      <div class="legend"><span class="l1">${t('legendPoints')}</span><span class="l2">${t('legendFluency')}</span></div>
-      <div class="chart" id="chart">${chartSeries.length < 1 ? `<div class="muted" style="display:grid;place-items:center;height:100%">${t('noHistoryYet')}</div>` : renderChartSVG(chartSeries)}</div>
-    </section>
-
-    <section class="card">
-      <div class="h2" style="margin-bottom:8px">${t('unlockedGroups')}</div>
-      <div class="list" style="gap:8px">
-        ${data.groupOrder.map(g => {
-          const p = groupProgress(g);
-          const pct = Math.round(p.masteryPct * 100);
-          return `
-          <div>
-            <div class="row between"><div style="font-size:14px">${tGroup(g)}</div><div class="muted" style="font-size:12px">${pct}% · ${p.learned}/${p.count}${p.mastered?` · ${p.mastered}★`:''}</div></div>
-            <div class="progressbar" style="margin-top:6px"><div class="fill" style="width:${pct}%"></div></div>
-          </div>`;
-        }).join('')}
-      </div>
+      <div class="row between" style="margin-bottom:6px"><div class="h2">${t('evolutionLastDays', {n: HISTORY_DAYS})}</div></div>
+      <div class="legend"><span class="l1">${t('legendLevel')}</span></div>
+      <div class="chart" id="chart">${chartSeries.length < 1 ? `<div class="muted" style="display:grid;place-items:center;height:100%">${t('noHistoryYet')}</div>` : renderLevelChartSVG(chartSeries)}</div>
     </section>
   `;
 }
 
-function renderChartSVG(series){
+function renderLevelChartSVG(series){
   const W = 320, H = 184, P = 22;
   const n = series.length;
   const xs = (i) => n === 1 ? W/2 : P + i * (W - 2*P) / (n - 1);
-  const maxPoints = Math.max(10, ...series.map(s => s.points || 0));
-  const ysPts = (v) => H - P - (v / maxPoints) * (H - 2*P);
-  const ysFlu = (v) => H - P - (v / 100) * (H - 2*P);
-  const ptsPath = series.map((s,i) => `${i===0?'M':'L'}${xs(i).toFixed(1)},${ysPts(s.points||0).toFixed(1)}`).join(' ');
-  const fluPath = series.map((s,i) => `${i===0?'M':'L'}${xs(i).toFixed(1)},${ysFlu(s.fluency||0).toFixed(1)}`).join(' ');
-  const gridY = [0, .25, .5, .75, 1].map(p => {
-    const y = (P + p * (H - 2*P)).toFixed(1);
-    return `<line x1="${P}" x2="${W-P}" y1="${y}" y2="${y}" stroke="#1f2a44" stroke-width="1"/>`;
+  // Y axis: levels 0..6
+  const ymax = 6, ymin = 0;
+  const ysLv = (v) => H - P - ((Math.max(ymin, Math.min(ymax, v)) - ymin) / (ymax - ymin)) * (H - 2*P);
+  const lvPath = series.map((s,i) => `${i===0?'M':'L'}${xs(i).toFixed(1)},${ysLv(s.level||0).toFixed(1)}`).join(' ');
+  // CEFR gridlines at 1..6 with labels
+  const gridY = [0,1,2,3,4,5,6].map(v => {
+    const y = ysLv(v).toFixed(1);
+    const label = v === 0 ? '' : CEFR_LABELS[v-1];
+    return `<line x1="${P}" x2="${W-P}" y1="${y}" y2="${y}" stroke="#1f2a44" stroke-width="1"/>
+            ${label ? `<text x="2" y="${(parseFloat(y)+3)}" fill="#94a3b8" font-size="9">${label}</text>` : ''}`;
   }).join('');
-  const ptsDots = series.map((s,i) => `<circle cx="${xs(i).toFixed(1)}" cy="${ysPts(s.points||0).toFixed(1)}" r="2.5" fill="#6ea8ff"/>`).join('');
-  const fluDots = series.map((s,i) => `<circle cx="${xs(i).toFixed(1)}" cy="${ysFlu(s.fluency||0).toFixed(1)}" r="2.5" fill="#7be0c2"/>`).join('');
+  const dots = series.map((s,i) => `<circle cx="${xs(i).toFixed(1)}" cy="${ysLv(s.level||0).toFixed(1)}" r="2.8" fill="#7be0c2"/>`).join('');
+  // Area fill under curve
+  const areaPath = series.length > 1
+    ? lvPath + ` L${xs(n-1).toFixed(1)},${(H-P)} L${xs(0).toFixed(1)},${(H-P)} Z`
+    : '';
   return `<svg viewBox="0 0 ${W} ${H}" width="100%" height="100%" preserveAspectRatio="none">
     ${gridY}
-    <path d="${ptsPath}" fill="none" stroke="#6ea8ff" stroke-width="2"/>
-    <path d="${fluPath}" fill="none" stroke="#7be0c2" stroke-width="2"/>
-    ${ptsDots}${fluDots}
+    ${areaPath ? `<path d="${areaPath}" fill="rgba(123,224,194,0.12)"/>` : ''}
+    <path d="${lvPath}" fill="none" stroke="#7be0c2" stroke-width="2"/>
+    ${dots}
   </svg>`;
 }
 
